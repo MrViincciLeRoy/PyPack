@@ -36,7 +36,7 @@ STDLIB = {
     "tabnanny", "telnetlib", "termios", "test", "textwrap", "tkinter", "tty",
     "turtle", "turtledemo", "uu", "webbrowser", "winreg", "winsound",
     "wsgiref", "xdrlib", "zipimport", "zoneinfo", "ntpath", "genericpath",
-    "asyncio", "calendar", "aiohttp", "nbformat",
+    "asyncio", "calendar", "nbformat",
 }
 
 IMPORT_TO_PACKAGE = {
@@ -45,8 +45,8 @@ IMPORT_TO_PACKAGE = {
     "git": "gitpython", "Crypto": "pycryptodome", "jwt": "pyjwt",
     "attr": "attrs", "dateutil": "python_dateutil", "magic": "python_magic",
     "usb": "pyusb", "serial": "pyserial", "wx": "wxpython",
-    "fitz": "pymupdf", "faiss": "faiss_cpu", "googleapiclient": "google_api_python_client",
-    "google": "google_auth", "werkzeug": "werkzeug",
+    "fitz": "pymupdf", "faiss": "faiss_cpu",
+    "googleapiclient": "google_api_python_client", "werkzeug": "werkzeug",
 }
 
 
@@ -90,8 +90,7 @@ def dedup_packages(packages: list[str]) -> list[str]:
         if name not in seen:
             seen[name] = pkg
         else:
-            current = seen[name]
-            if "==" in pkg and "==" not in current:
+            if "==" in pkg and "==" not in seen[name]:
                 seen[name] = pkg
     return list(seen.values())
 
@@ -141,23 +140,66 @@ def check_missing(req_packages: list[str], imports: set[str]) -> list[str]:
 
 
 def download_packages(packages: list[str], output_dir: Path) -> list[str]:
-    """Download packages one by one, return list of failed ones."""
+    """Download packages + ALL their dependencies one by one. Returns failed list."""
     output_dir.mkdir(parents=True, exist_ok=True)
     failed = []
     for pkg in packages:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "download", "--dest", str(output_dir), pkg],
+            [
+                sys.executable, "-m", "pip", "download",
+                "--dest", str(output_dir),
+                pkg,
+            ],
             capture_output=True, text=True
         )
         if result.returncode != 0:
             print(f"  ✗ Failed: {pkg}")
             for line in result.stderr.splitlines():
-                if any(k in line.lower() for k in ["error", "x ", "hint", "invalid"]):
+                if any(k in line.lower() for k in ["error", "×", "hint", "invalid"]):
                     print(f"    {line.strip()}")
             failed.append(pkg)
         else:
             print(f"  ✓ {pkg}")
     return failed
+
+
+def write_install_scripts(output_dir: Path, packages: list[str], skipped: list[str]):
+    """Write requirements.txt + install.bat + install.sh into the output folder."""
+
+    # Write a clean requirements.txt (just package names, no versions for flexibility)
+    req_content = "\n".join(packages) + "\n"
+    (output_dir / "requirements.txt").write_text(req_content)
+
+    bat = (
+        "@echo off\n"
+        "echo Installing packages offline...\n"
+        "pip install --no-index --find-links=%~dp0 -r %~dp0requirements.txt\n"
+        "echo.\n"
+        "echo Done!\n"
+        + (
+            "echo.\n"
+            "echo NOTE: The following entries were skipped (git/url based, install manually):\n"
+            + "".join(f"echo   - {s}\n" for s in skipped)
+            if skipped else ""
+        )
+        + "pause\n"
+    )
+    (output_dir / "install.bat").write_text(bat)
+
+    sh = (
+        "#!/bin/bash\n"
+        'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        "echo Installing packages offline...\n"
+        'pip install --no-index --find-links="$SCRIPT_DIR" -r "$SCRIPT_DIR/requirements.txt"\n'
+        "echo Done!\n"
+        + (
+            "echo\n"
+            "echo NOTE: The following entries were skipped (git/url based, install manually):\n"
+            + "".join(f"echo '  - {s}'\n" for s in skipped)
+            if skipped else ""
+        )
+    )
+    (output_dir / "install.sh").write_text(sh)
 
 
 def create_zip(source_dir: Path, zip_path: Path):
@@ -208,7 +250,7 @@ def main():
                     else:
                         print("  ✓ All detected imports seem covered")
 
-            results.append((url, pkgs))
+            results.append((url, pkgs, skipped))
             all_packages.extend(pkgs)
 
         except Exception as e:
@@ -222,15 +264,17 @@ def main():
         tmp = out_base / "_merged_tmp"
         failed = download_packages(deduped, tmp)
         all_failed.extend(failed)
+        write_install_scripts(tmp, deduped, all_skipped)
         create_zip(tmp, out_base / "packages_merged.zip")
         shutil.rmtree(tmp, ignore_errors=True)
     else:
-        for url, pkgs in results:
+        for url, pkgs, skipped in results:
             label = re.sub(r"[^\w]", "_", url.split("github.com/")[-1])[:60]
             print(f"\n[→] Downloading for {label}...")
             tmp = out_base / f"_tmp_{label}"
             failed = download_packages(pkgs, tmp)
             all_failed.extend(failed)
+            write_install_scripts(tmp, pkgs, skipped)
             create_zip(tmp, out_base / f"{label}.zip")
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -241,7 +285,7 @@ def main():
         for f in all_failed:
             print(f"  - {f}")
     if all_skipped:
-        print(f"\n⚠ {len(all_skipped)} git/url entries were skipped (install manually from source):")
+        print(f"\n⚠ {len(all_skipped)} git/url entries skipped (install manually from source):")
         for s in all_skipped:
             print(f"  - {s}")
 
