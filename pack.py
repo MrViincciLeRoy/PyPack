@@ -1,13 +1,13 @@
-import os
-import re
 import ast
-import sys
-import shutil
-import zipfile
 import argparse
+import re
+import shutil
 import subprocess
+import sys
 import tempfile
+import zipfile
 from pathlib import Path
+
 import requests
 
 STDLIB = {
@@ -24,23 +24,33 @@ STDLIB = {
     "rlcompleter", "runpy", "sched", "secrets", "select", "shelve", "shlex",
     "smtplib", "sndhdr", "stat", "statistics", "tokenize", "token", "trace",
     "types", "venv", "wave", "xml", "xmlrpc", "zipapp", "zlib", "builtins",
-    "_thread", "abc", "atexit", "base64", "bdb", "binascii", "binhex",
-    "bisect", "cgi", "cgitb", "chunk", "cmath", "code", "codecs", "codeop",
-    "compileall", "concurrent", "configparser", "cProfile", "crypt", "curses",
-    "dbm", "dis", "doctest", "encodings", "errno", "faulthandler", "fcntl",
-    "formatter", "ftplib", "gc", "gettext", "graphlib", "imaplib", "imghdr",
-    "imp", "importlib", "lib2to3", "lzma", "mailbox", "mailcap", "marshal",
-    "mmap", "modulefinder", "netrc", "nis", "nntplib", "plistlib", "poplib",
-    "posix", "posixpath", "pty", "pwd", "py_compile", "pyclbr", "pydoc",
-    "quopri", "sre_compile", "sre_constants", "sre_parse", "ssl", "stringprep",
-    "sunau", "symtable", "sysconfig", "syslog", "tabnanny", "telnetlib",
-    "termios", "test", "textwrap", "tkinter", "tty", "turtle", "turtledemo",
-    "uu", "webbrowser", "winreg", "winsound", "wsgiref", "xdrlib", "xmlrpc",
-    "zipimport", "zoneinfo", "ntpath", "posixpath", "genericpath"
+    "_thread", "atexit", "base64", "bdb", "binascii", "binhex", "bisect",
+    "cgi", "cgitb", "chunk", "cmath", "code", "codecs", "codeop", "compileall",
+    "concurrent", "configparser", "cProfile", "crypt", "curses", "dbm", "dis",
+    "doctest", "encodings", "errno", "faulthandler", "fcntl", "formatter",
+    "ftplib", "gc", "gettext", "graphlib", "imaplib", "imghdr", "imp",
+    "importlib", "lib2to3", "lzma", "mailbox", "mailcap", "marshal", "mmap",
+    "modulefinder", "netrc", "nis", "nntplib", "plistlib", "poplib", "posix",
+    "posixpath", "pty", "pwd", "py_compile", "pyclbr", "pydoc", "quopri",
+    "ssl", "stringprep", "sunau", "symtable", "sysconfig", "syslog",
+    "tabnanny", "telnetlib", "termios", "test", "textwrap", "tkinter", "tty",
+    "turtle", "turtledemo", "uu", "webbrowser", "winreg", "winsound",
+    "wsgiref", "xdrlib", "zipimport", "zoneinfo", "ntpath", "genericpath",
+    "asyncio", "calendar", "aiohttp", "nbformat",
 }
 
+IMPORT_TO_PACKAGE = {
+    "cv2": "opencv_python", "PIL": "pillow", "sklearn": "scikit_learn",
+    "bs4": "beautifulsoup4", "yaml": "pyyaml", "dotenv": "python_dotenv",
+    "git": "gitpython", "Crypto": "pycryptodome", "jwt": "pyjwt",
+    "attr": "attrs", "dateutil": "python_dateutil", "magic": "python_magic",
+    "usb": "pyusb", "serial": "pyserial", "wx": "wxpython",
+    "fitz": "pymupdf", "faiss": "faiss_cpu", "googleapiclient": "google_api_python_client",
+    "google": "google_auth", "werkzeug": "werkzeug",
+}
+
+
 def raw_github_url(url: str) -> str:
-    """Convert GitHub URL to raw content URL."""
     url = url.strip()
     if "raw.githubusercontent.com" in url:
         return url
@@ -50,25 +60,49 @@ def raw_github_url(url: str) -> str:
         return f"https://raw.githubusercontent.com/{user}/{repo}/{path}"
     raise ValueError(f"Cannot convert to raw URL: {url}")
 
-def fetch_requirements(url: str) -> list[str]:
+
+def fetch_requirements(url: str) -> tuple[list[str], list[str]]:
+    """Returns (pip_installable, skipped_git_urls)."""
     raw = raw_github_url(url)
     resp = requests.get(raw, timeout=30)
     resp.raise_for_status()
-    pkgs = []
+    pkgs, skipped = [], []
     for line in resp.text.splitlines():
         line = line.strip()
-        if line and not line.startswith("#") and not line.startswith("-"):
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        if line.startswith("git+") or (line.startswith("http") and "github.com" in line):
+            skipped.append(line)
+        else:
             pkgs.append(line)
-    return pkgs
+    return pkgs, skipped
+
+
+def normalize_pkg_name(pkg: str) -> str:
+    return re.split(r"[>=<!;\[]", pkg)[0].strip().lower().replace("-", "_")
+
+
+def dedup_packages(packages: list[str]) -> list[str]:
+    """Keep one entry per package name — prefer pinned (==) versions."""
+    seen: dict[str, str] = {}
+    for pkg in packages:
+        name = normalize_pkg_name(pkg)
+        if name not in seen:
+            seen[name] = pkg
+        else:
+            current = seen[name]
+            if "==" in pkg and "==" not in current:
+                seen[name] = pkg
+    return list(seen.values())
+
 
 def scan_repo_imports(repo_url: str) -> set[str]:
-    """Clone repo and scan all .py files for imports."""
     match = re.match(r"https://github\.com/([^/]+)/([^/]+)", repo_url)
     if not match:
         return set()
     tmpdir = tempfile.mkdtemp()
     try:
-        print(f"  Cloning repo for import scanning...")
+        print("  Cloning repo for import scanning...")
         subprocess.run(
             ["git", "clone", "--depth=1", repo_url, tmpdir],
             capture_output=True, check=True
@@ -93,41 +127,49 @@ def scan_repo_imports(repo_url: str) -> set[str]:
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-def normalize_pkg_name(pkg: str) -> str:
-    return re.split(r"[>=<!;\[]", pkg)[0].strip().lower().replace("-", "_")
 
 def check_missing(req_packages: list[str], imports: set[str]) -> list[str]:
     req_normalized = {normalize_pkg_name(p) for p in req_packages}
-    # Common import→package name mappings
-    known_mappings = {
-        "cv2": "opencv_python", "PIL": "pillow", "sklearn": "scikit_learn",
-        "bs4": "beautifulsoup4", "yaml": "pyyaml", "dotenv": "python_dotenv",
-        "git": "gitpython", "Crypto": "pycryptodome", "jwt": "pyjwt",
-        "attr": "attrs", "dateutil": "python_dateutil", "magic": "python_magic",
-        "usb": "pyusb", "serial": "pyserial", "wx": "wxpython",
-    }
     missing = []
     for imp in sorted(imports):
         if imp in STDLIB:
             continue
-        mapped = known_mappings.get(imp, imp).lower().replace("-", "_")
+        mapped = IMPORT_TO_PACKAGE.get(imp, imp).lower().replace("-", "_")
         if mapped not in req_normalized and imp.lower().replace("-", "_") not in req_normalized:
             missing.append(imp)
     return missing
 
-def download_packages(packages: list[str], output_dir: Path):
+
+def download_packages(packages: list[str], output_dir: Path) -> list[str]:
+    """Download packages one by one, return list of failed ones."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  Downloading {len(packages)} package(s)...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "download", "--dest", str(output_dir), *packages],
-        check=True
-    )
+    failed = []
+    for pkg in packages:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "download", "--dest", str(output_dir), pkg],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"  ✗ Failed: {pkg}")
+            for line in result.stderr.splitlines():
+                if any(k in line.lower() for k in ["error", "x ", "hint", "invalid"]):
+                    print(f"    {line.strip()}")
+            failed.append(pkg)
+        else:
+            print(f"  ✓ {pkg}")
+    return failed
+
 
 def create_zip(source_dir: Path, zip_path: Path):
+    files = list(source_dir.iterdir())
+    if not files:
+        print(f"  ⚠ Nothing to zip for {zip_path.name} — skipping")
+        return
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in source_dir.iterdir():
+        for f in files:
             zf.write(f, f.name)
-    print(f"  Created: {zip_path}")
+    size_mb = zip_path.stat().st_size / 1024 / 1024
+    print(f"  Created: {zip_path.name} ({size_mb:.1f} MB)")
 
 
 def main():
@@ -142,13 +184,19 @@ def main():
     out_base.mkdir(exist_ok=True)
 
     all_packages = []
+    all_skipped = []
     results = []
 
     for url in args.urls:
         print(f"\n[→] Processing: {url}")
         try:
-            pkgs = fetch_requirements(url)
-            print(f"  Found {len(pkgs)} package(s) in requirements")
+            pkgs, skipped = fetch_requirements(url)
+            print(f"  Found {len(pkgs)} pip-installable package(s)")
+            if skipped:
+                print(f"  ⚠ Skipped {len(skipped)} git/url entries (not supported by pip download):")
+                for s in skipped:
+                    print(f"    - {s}")
+                all_skipped.extend(skipped)
 
             if args.check_missing:
                 repo_base = re.match(r"(https://github\.com/[^/]+/[^/]+)", url)
@@ -158,28 +206,44 @@ def main():
                     if missing:
                         print(f"  ⚠ Possibly unlisted imports: {', '.join(missing)}")
                     else:
-                        print(f"  ✓ All detected imports seem covered")
+                        print("  ✓ All detected imports seem covered")
 
             results.append((url, pkgs))
             all_packages.extend(pkgs)
 
         except Exception as e:
-            print(f"  ✗ Failed: {e}")
+            print(f"  ✗ Failed to fetch: {e}")
+
+    all_failed = []
 
     if args.merge:
+        deduped = dedup_packages(all_packages)
+        print(f"\n[→] Downloading {len(deduped)} unique package(s) (merged)...")
         tmp = out_base / "_merged_tmp"
-        download_packages(list(set(all_packages)), tmp)
+        failed = download_packages(deduped, tmp)
+        all_failed.extend(failed)
         create_zip(tmp, out_base / "packages_merged.zip")
-        shutil.rmtree(tmp)
+        shutil.rmtree(tmp, ignore_errors=True)
     else:
         for url, pkgs in results:
             label = re.sub(r"[^\w]", "_", url.split("github.com/")[-1])[:60]
+            print(f"\n[→] Downloading for {label}...")
             tmp = out_base / f"_tmp_{label}"
-            download_packages(pkgs, tmp)
+            failed = download_packages(pkgs, tmp)
+            all_failed.extend(failed)
             create_zip(tmp, out_base / f"{label}.zip")
-            shutil.rmtree(tmp)
+            shutil.rmtree(tmp, ignore_errors=True)
 
-    print(f"\n✓ Done. Output in: {out_base}/")
+    print(f"\n{'='*60}")
+    print(f"✓ Done. Output in: {out_base}/")
+    if all_failed:
+        print(f"\n⚠ {len(all_failed)} package(s) failed to download:")
+        for f in all_failed:
+            print(f"  - {f}")
+    if all_skipped:
+        print(f"\n⚠ {len(all_skipped)} git/url entries were skipped (install manually from source):")
+        for s in all_skipped:
+            print(f"  - {s}")
 
 
 if __name__ == "__main__":
