@@ -1,0 +1,60 @@
+name: Download Packages for Offline Use
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: >
+          GitHub URLs to requirements.txt files (one per line or space-separated).
+          Example: https://github.com/user/repo/blob/main/requirements.txt
+        required: true
+        type: string
+      merge:
+        description: Merge all packages into a single zip
+        required: false
+        default: false
+        type: boolean
+      check_missing:
+        description: Scan repo(s) for imports not listed in requirements
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script deps
+        run: pip install requests
+
+      - name: Run pack.py
+        run: |
+          # Split multi-line or space-separated URLs
+          URLS="${{ github.event.inputs.urls }}"
+          URL_ARGS=$(echo "$URLS" | tr '\n' ' ' | xargs)
+
+          EXTRA_FLAGS=""
+          if [ "${{ github.event.inputs.merge }}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --merge"
+          fi
+          if [ "${{ github.event.inputs.check_missing }}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --check-missing"
+          fi
+
+          python pack.py $URL_ARGS --output-dir packages $EXTRA_FLAGS
+
+      - name: Upload packages as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-packages
+          path: packages/*.zip
+          retention-days: 7
