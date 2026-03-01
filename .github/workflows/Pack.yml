@@ -6,7 +6,6 @@ on:
       urls:
         description: >
           GitHub URLs to requirements.txt files (one per line or space-separated).
-          Example: https://github.com/user/repo/blob/main/requirements.txt
         required: true
         type: string
       merge:
@@ -19,6 +18,29 @@ on:
         required: false
         default: false
         type: boolean
+      platform:
+        description: "Target OS platform (default: win_amd64 for Windows 64-bit)"
+        required: false
+        default: "win_amd64"
+        type: choice
+        options:
+          - win_amd64
+          - win32
+          - manylinux2014_x86_64
+          - manylinux2014_aarch64
+          - macosx_11_0_x86_64
+          - macosx_11_0_arm64
+      python_version:
+        description: "Python version on your offline machine (default: 311 = Python 3.11)"
+        required: false
+        default: "311"
+        type: choice
+        options:
+          - "39"
+          - "310"
+          - "311"
+          - "312"
+          - "313"
 
 jobs:
   pack:
@@ -38,11 +60,10 @@ jobs:
 
       - name: Run pack.py
         run: |
-          # Split multi-line or space-separated URLs
-          URLS="${{ github.event.inputs.urls }}"
-          URL_ARGS=$(echo "$URLS" | tr '\n' ' ' | xargs)
+          URL_ARGS=$(echo "${{ github.event.inputs.urls }}" | tr '\n' ' ' | xargs)
 
-          EXTRA_FLAGS=""
+          EXTRA_FLAGS="--platform ${{ github.event.inputs.platform }} --python-version ${{ github.event.inputs.python_version }}"
+
           if [ "${{ github.event.inputs.merge }}" = "true" ]; then
             EXTRA_FLAGS="$EXTRA_FLAGS --merge"
           fi
