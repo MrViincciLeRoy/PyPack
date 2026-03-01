@@ -234,9 +234,14 @@ def create_zip(source_dir: Path, zip_path: Path):
     print(f"  Created: {zip_path.name} ({size_mb:.1f} MB)")
 
 
+def is_github_url(s: str) -> bool:
+    return s.startswith("https://github.com") or s.startswith("http://github.com")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download Python packages for offline use")
-    parser.add_argument("urls", nargs="+", help="GitHub URLs to requirements.txt files")
+    parser.add_argument("inputs", nargs="+",
+        help="GitHub URLs to requirements.txt files OR plain package names (e.g. flask django numpy)")
     parser.add_argument("--merge", action="store_true", help="Merge all packages into one zip")
     parser.add_argument("--output-dir", default="packages", help="Output directory (default: packages)")
     parser.add_argument("--check-missing", action="store_true", help="Scan repo for unlisted imports")
@@ -254,7 +259,18 @@ def main():
     all_skipped = []
     results = []
 
-    for url in args.urls:
+    # Separate URLs from direct package names
+    urls = [i for i in args.inputs if is_github_url(i)]
+    direct_pkgs = [i for i in args.inputs if not is_github_url(i)]
+
+    # Handle direct package names as a virtual "requirements"
+    if direct_pkgs:
+        label = "direct_packages"
+        print(f"\n[→] Direct packages: {', '.join(direct_pkgs)}")
+        results.append((label, direct_pkgs, []))
+        all_packages.extend(direct_pkgs)
+
+    for url in urls:
         print(f"\n[→] Processing: {url}")
         try:
             pkgs, skipped = fetch_requirements(url)
@@ -293,8 +309,11 @@ def main():
         create_zip(tmp, out_base / "packages_merged.zip")
         shutil.rmtree(tmp, ignore_errors=True)
     else:
-        for url, pkgs, skipped in results:
-            label = re.sub(r"[^\w]", "_", url.split("github.com/")[-1])[:60]
+        for entry, pkgs, skipped in results:
+            if is_github_url(entry):
+                label = re.sub(r"[^\w]", "_", entry.split("github.com/")[-1])[:60]
+            else:
+                label = "_".join(pkgs)[:60]
             print(f"\n[→] Downloading for {label}...")
             tmp = out_base / f"_tmp_{label}"
             failed = download_packages(pkgs, tmp, args.platform, args.python_version)
