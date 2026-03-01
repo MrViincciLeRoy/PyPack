@@ -5,11 +5,16 @@ on:
     inputs:
       urls:
         description: >
-          GitHub URLs to requirements.txt files (one per line or space-separated).
-        required: true
+          GitHub URLs to requirements.txt files (one per line or space-separated). Leave empty if using packages below.
+        required: false
+        type: string
+      packages:
+        description: >
+          Individual packages to download (space-separated). E.g: flask django numpy pandas colorama
+        required: false
         type: string
       merge:
-        description: Merge all packages into a single zip
+        description: Merge everything into a single zip
         required: false
         default: false
         type: boolean
@@ -19,7 +24,7 @@ on:
         default: false
         type: boolean
       platform:
-        description: "Target OS platform (default: win_amd64 for Windows 64-bit)"
+        description: "Target OS (default: win_amd64 = Windows 64-bit)"
         required: false
         default: "win_amd64"
         type: choice
@@ -31,7 +36,7 @@ on:
           - macosx_11_0_x86_64
           - macosx_11_0_arm64
       python_version:
-        description: "Python version on your offline machine (default: 311 = Python 3.11)"
+        description: "Python version on your offline machine"
         required: false
         default: "311"
         type: choice
@@ -60,7 +65,23 @@ jobs:
 
       - name: Run pack.py
         run: |
-          URL_ARGS=$(echo "${{ github.event.inputs.urls }}" | tr '\n' ' ' | xargs)
+          INPUTS=""
+
+          # Add GitHub URLs if provided
+          if [ -n "${{ github.event.inputs.urls }}" ]; then
+            URL_ARGS=$(echo "${{ github.event.inputs.urls }}" | tr '\n' ' ' | xargs)
+            INPUTS="$INPUTS $URL_ARGS"
+          fi
+
+          # Add direct package names if provided
+          if [ -n "${{ github.event.inputs.packages }}" ]; then
+            INPUTS="$INPUTS ${{ github.event.inputs.packages }}"
+          fi
+
+          if [ -z "$INPUTS" ]; then
+            echo "ERROR: Provide at least one URL or package name."
+            exit 1
+          fi
 
           EXTRA_FLAGS="--platform ${{ github.event.inputs.platform }} --python-version ${{ github.event.inputs.python_version }}"
 
@@ -71,7 +92,7 @@ jobs:
             EXTRA_FLAGS="$EXTRA_FLAGS --check-missing"
           fi
 
-          python pack.py $URL_ARGS --output-dir packages $EXTRA_FLAGS
+          python pack.py $INPUTS --output-dir packages $EXTRA_FLAGS
 
       - name: Upload packages as artifact
         uses: actions/upload-artifact@v4
