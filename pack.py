@@ -139,19 +139,39 @@ def check_missing(req_packages: list[str], imports: set[str]) -> list[str]:
     return missing
 
 
-def download_packages(packages: list[str], output_dir: Path) -> list[str]:
-    """Download packages + ALL their dependencies one by one. Returns failed list."""
+def download_packages(packages: list[str], output_dir: Path, platform: str, python_version: str) -> list[str]:
+    """Download Windows/Linux/Mac wheels. Returns failed list."""
     output_dir.mkdir(parents=True, exist_ok=True)
     failed = []
+
+    # Platform-specific flags
+    platform_flags = [
+        "--platform", platform,
+        "--python-version", python_version,
+        "--implementation", "cp",
+        "--only-binary=:all:",
+    ]
+
     for pkg in packages:
+        # Try platform-specific first
         result = subprocess.run(
-            [
-                sys.executable, "-m", "pip", "download",
-                "--dest", str(output_dir),
-                pkg,
-            ],
+            [sys.executable, "-m", "pip", "download", "--dest", str(output_dir), *platform_flags, pkg],
             capture_output=True, text=True
         )
+        if result.returncode != 0:
+            # Fallback: try pure python (any platform) wheels
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "download", "--dest", str(output_dir),
+                 "--platform", "any", "--python-version", python_version,
+                 "--implementation", "py", "--only-binary=:all:", pkg],
+                capture_output=True, text=True
+            )
+        if result.returncode != 0:
+            # Last resort: no platform restriction (downloads source/sdist)
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "download", "--dest", str(output_dir), pkg],
+                capture_output=True, text=True
+            )
         if result.returncode != 0:
             print(f"  ✗ Failed: {pkg}")
             for line in result.stderr.splitlines():
@@ -220,7 +240,12 @@ def main():
     parser.add_argument("--merge", action="store_true", help="Merge all packages into one zip")
     parser.add_argument("--output-dir", default="packages", help="Output directory (default: packages)")
     parser.add_argument("--check-missing", action="store_true", help="Scan repo for unlisted imports")
+    parser.add_argument("--platform", default="win_amd64",
+        help="Target platform (default: win_amd64). Options: win_amd64, win32, manylinux2014_x86_64, macosx_11_0_arm64")
+    parser.add_argument("--python-version", default="311",
+        help="Target Python version digits (default: 311). E.g. 310, 312, 313")
     args = parser.parse_args()
+    print(f"  Target: {args.platform} / Python {args.python_version}")
 
     out_base = Path(args.output_dir)
     out_base.mkdir(exist_ok=True)
@@ -262,7 +287,7 @@ def main():
         deduped = dedup_packages(all_packages)
         print(f"\n[→] Downloading {len(deduped)} unique package(s) (merged)...")
         tmp = out_base / "_merged_tmp"
-        failed = download_packages(deduped, tmp)
+        failed = download_packages(deduped, tmp, args.platform, args.python_version)
         all_failed.extend(failed)
         write_install_scripts(tmp, deduped, all_skipped)
         create_zip(tmp, out_base / "packages_merged.zip")
@@ -272,7 +297,7 @@ def main():
             label = re.sub(r"[^\w]", "_", url.split("github.com/")[-1])[:60]
             print(f"\n[→] Downloading for {label}...")
             tmp = out_base / f"_tmp_{label}"
-            failed = download_packages(pkgs, tmp)
+            failed = download_packages(pkgs, tmp, args.platform, args.python_version)
             all_failed.extend(failed)
             write_install_scripts(tmp, pkgs, skipped)
             create_zip(tmp, out_base / f"{label}.zip")
